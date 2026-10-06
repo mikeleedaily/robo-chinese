@@ -223,6 +223,19 @@ textarea.io{width:100%;height:90px;border:2px solid var(--line);border-radius:12
 .confetti{position:fixed;top:-12px;z-index:70;pointer-events:none;animation:fall linear forwards;}
 @keyframes fall{to{transform:translateY(110vh) rotate(720deg);opacity:.8}}
 
+/* ── 인터랙션 고도화 ── */
+.opt.no{border-color:var(--red);background:var(--red-l);box-shadow:0 3px 0 var(--red);animation:shake .4s;}
+@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
+.pbar .fill.glow{box-shadow:0 0 12px 2px rgba(88,204,2,.6);transition:box-shadow .3s;}
+.combo-badge{display:inline-block;background:rgba(255,255,255,.28);border-radius:99px;padding:2px 11px;font-size:12.5px;font-weight:900;margin-left:8px;vertical-align:2px;}
+.corner-robot{position:fixed;right:8px;bottom:168px;z-index:33;pointer-events:none;opacity:.92;}
+.corner-robot.jump{animation:crJump .55s;}
+@keyframes crJump{0%,100%{transform:translateY(0)}40%{transform:translateY(-16px) scale(1.1) rotate(-4deg)}}
+.corner-robot.sad{animation:crSad .45s;}
+@keyframes crSad{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px) rotate(-3deg)}75%{transform:translateX(5px) rotate(3deg)}}
+.ph.pop{animation:cardIn .5s cubic-bezier(.2,1.5,.4,1) backwards;}
+@keyframes cardIn{from{transform:scale(.55) translateY(16px);opacity:0}to{transform:none;opacity:1}}
+
 .hearts-grid{display:flex;gap:8px;justify-content:center;font-size:30px;margin:12px 0;}
 .locked-note{color:var(--muted);font-size:13.5px;text-align:center;margin:30px 16px;font-weight:600;}
 .review-fab{position:fixed;bottom:86px;right:14px;z-index:33;background:var(--purple);color:#fff;

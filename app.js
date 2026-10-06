@@ -24,7 +24,8 @@ const DEFAULT_STATE = {
   hearts: { n: 5, ts: Date.now() },
   lessons: {},            // id -> {done, plays, best, last}
   items: {},              // SRS itemKey -> {seen, ok, s, last, due}
-  settings: { tts: true, ttsRate: 0.85, py: true, goal: 50 },
+  settings: { tts: true, ttsRate: 0.85, py: true, goal: 50, sfx: true, sfxVol: 2 },
+  goalShown: "",
 };
 let S = loadState();
 function loadState() {
@@ -79,20 +80,60 @@ function weakestItems(limit) {
 /* ───────────────────────────── 사운드/TTS ───────────────────────────── */
 let AC = null;
 function ac() { if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { } } if (AC && AC.state === "suspended") AC.resume(); return AC; }
-function beep(freqs, dur, type, gain) {
-  const c = ac(); if (!c) return;
-  let t = c.currentTime;
-  freqs.forEach(f => {
+/* ── 듀오링고풍 SFX 엔진: 배음+엔벨로프 합성 (외부 파일 없음) ── */
+function sfxVol() { return [0, 0.35, 0.6, 0.9][S.settings.sfxVol || 2] || 0.6; }
+/* 단음: f=주파수, at=시작지연(s), dur=길이, opt{type, vol(0~1), harm(배음 세기 0~1), glide(끝 주파수 배율)} */
+function note(f, at, dur, opt) {
+  const c = ac(); if (!c || !S.settings.sfx) return;
+  opt = opt || {};
+  const v = (opt.vol == null ? 0.5 : opt.vol) * sfxVol();
+  const t0 = c.currentTime + (at || 0);
+  const voices = [[f, 1], [f * 2, (opt.harm == null ? 0.28 : opt.harm)], [f * 3.02, (opt.harm || 0) * 0.35]];
+  voices.forEach(([fr, w]) => {
+    if (w <= 0.01 || v * w < 0.003) return;
     const o = c.createOscillator(), g = c.createGain();
-    o.type = type || "sine"; o.frequency.value = f;
-    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(gain || 0.12, t + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + (dur || 0.16));
-    o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + (dur || 0.16) + 0.05); t += (dur || 0.16) * 0.9;
+    o.type = opt.type || "sine";
+    o.frequency.setValueAtTime(fr, t0);
+    if (opt.glide) o.frequency.exponentialRampToValueAtTime(Math.max(30, fr * opt.glide), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.004, v * w), t0 + 0.012);        /* attack */
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);                          /* decay */
+    o.connect(g); g.connect(c.destination); o.start(t0); o.stop(t0 + dur + 0.05);
   });
 }
-const sGood = () => beep([660, 880], 0.14);
-const sBad = () => beep([200, 150], 0.2, "square", 0.08);
-const sDone = () => beep([523, 659, 784, 1046], 0.13);
+/* 탭 틱 (선택지·타일) */
+const sTap = () => note(1250, 0, 0.035, { vol: 0.14, harm: 0 });
+/* 짝 맞춤 팝 */
+const sPop = () => note(430, 0, 0.09, { vol: 0.3, glide: 2.1, harm: 0.1 });
+/* 정답 벨 '띵동' — 콤보가 오를수록 음이 높아짐(3단계마다 +1반음, 최대 +7) */
+function sCorrect(combo) {
+  const semi = Math.min(7, Math.floor((combo || 1) / 3));
+  const r = Math.pow(2, semi / 12);
+  note(784 * r, 0, 0.16, { vol: 0.5, harm: 0.3 });
+  note(988 * r, 0.1, 0.24, { vol: 0.5, harm: 0.34 });
+  if (semi >= 5) note(1319 * r, 0.22, 0.2, { vol: 0.22, harm: 0.2 }); /* 하이콤보 꼬리 */
+}
+/* 오답: 낮은 톤 두드림 + 서브섬프 */
+function sWrong() {
+  note(196, 0, 0.16, { type: "triangle", vol: 0.34, glide: 0.92, harm: 0.06 });
+  note(98, 0.02, 0.22, { type: "sine", vol: 0.3, harm: 0 });
+}
+/* 레슨 완료 팡파레: 아르페지오 + 화음 + 쉬머 */
+function sFanfare() {
+  const seq = [[523, 0], [659, 0.11], [784, 0.22], [1046, 0.33]];
+  seq.forEach(([f, t]) => note(f, t, 0.16, { vol: 0.42, harm: 0.3 }));
+  [1046, 1318, 1568].forEach((f, i) => note(f, 0.46, 0.55, { vol: 0.3 - i * 0.05, harm: 0.22 }));
+  note(2093, 0.5, 0.4, { type: "triangle", vol: 0.06, harm: 0 });
+}
+/* 일일 목표 달성 팡파레 */
+function sGoal() {
+  [[392, 0], [523, 0.1], [659, 0.2], [784, 0.3], [1046, 0.42]].forEach(([f, t]) => note(f, t, 0.18, { vol: 0.42, harm: 0.3 }));
+  [1046, 1318].forEach((f, i) => note(f, 0.56, 0.6, { vol: 0.28 - i * 0.06, harm: 0.24 }));
+}
+/* 하트 소실 텁 */
+const sHeartLost = () => note(150, 0, 0.25, { type: "sine", vol: 0.22, glide: 0.6, harm: 0 });
+/* 햅틱 (Android 크롬 지원, iOS 웹앱은 API 없어 자동 무시) */
+function vib(p) { if (S.settings.sfx && navigator.vibrate) { try { navigator.vibrate(p); } catch (e) { } } }
 
 let zhVoice = null;
 function findVoice() {
@@ -579,7 +620,7 @@ function startLesson(lesson) {
   if (S.hearts.n <= 0) { heartsEmptyModal(); return; }
   LESSON = {
     lesson, queue: genExercises(lesson), idx: 0,
-    asked: 0, correct: 0, xp: 0, requeued: new Set(),
+    asked: 0, correct: 0, xp: 0, requeued: new Set(), combo: 0,
   };
   if (!LESSON.queue.length) { toast("학습할 항목이 부족합니다"); return; }
   renderLesson();
@@ -596,6 +637,7 @@ function renderLesson() {
       <div class="stat-chip" style="color:var(--red);font-size:16px"><span class="ico">❤️</span>${S.hearts.n}</div>
     </div>
     <div class="lesson-body" id="ex-area"></div>
+    <div class="corner-robot" id="crobot">${robotSVG("happy", 46)}</div>
     <div class="checkbar" id="checkbar">
       <button class="btn big btn-gray" id="btn-check" disabled>확인</button>
     </div>
@@ -626,7 +668,7 @@ function renderExercise(ex) {
     let sel = null;
     $$("#opts .opt").forEach(b => b.addEventListener("click", () => {
       $$("#opts .opt").forEach(x => x.classList.remove("sel"));
-      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false;
+      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false; sTap();
     }));
     onCheck(() => {
       const val = ex.opts[sel];
@@ -650,7 +692,7 @@ function renderExercise(ex) {
     let sel = null;
     $$("#opts .opt").forEach(b => b.addEventListener("click", () => {
       $$("#opts .opt").forEach(x => x.classList.remove("sel"));
-      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false;
+      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false; sTap();
     }));
     onCheck(() => {
       const val = ex.opts[sel];
@@ -674,7 +716,7 @@ function renderExercise(ex) {
       const r = matchState.selR; if (!r) return;
       if (selL.dataset.k === r.dataset.k) {
         selL.classList.remove("sel"); selL.classList.add("ok"); r.classList.remove("sel"); r.classList.add("ok");
-        speak(selL.dataset.k); matched++;
+        sPop(); speak(selL.dataset.k); matched++;
         selL = null; matchState.selR = null;
         if (matched === need) { setTimeout(() => grade(ex, mistakes === 0, () => { }), 350); }
       } else {
@@ -709,7 +751,7 @@ function renderExercise(ex) {
     $$("#bank .tile").forEach(t => t.addEventListener("click", () => {
       const bi = +t.dataset.i;
       if (chosen.some(c => c.bankIdx === bi)) return;
-      chosen.push({ t: ex.bank[bi], bankIdx: bi }); refresh(); beep([500], 0.05, "sine", 0.04);
+      chosen.push({ t: ex.bank[bi], bankIdx: bi }); refresh(); sTap();
     }));
     refresh();
     onCheck(() => {
@@ -727,7 +769,7 @@ function renderExercise(ex) {
     let sel = null;
     $$("#opts .opt").forEach(b => b.addEventListener("click", () => {
       $$("#opts .opt").forEach(x => x.classList.remove("sel"));
-      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false;
+      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false; sTap();
     }));
     onCheck(() => {
       const val = ex.opts[sel] && ex.opts[sel].zh;
@@ -745,7 +787,7 @@ function renderExercise(ex) {
     let sel = null;
     $$("#opts .opt").forEach(b => b.addEventListener("click", () => {
       $$("#opts .opt").forEach(x => x.classList.remove("sel"));
-      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false;
+      b.classList.add("sel"); sel = +b.dataset.i; $("#btn-check").disabled = false; sTap();
       const bl = $("#blank"); if (bl) bl.textContent = ex.opts[sel];
     }));
     onCheck(() => {
@@ -767,23 +809,46 @@ function onCheck(fn) {
   b.className = "btn big btn-green";
   b.onclick = fn;
 }
+function praiseText(combo) {
+  if (combo >= 8) return "완벽해요! 🔥";
+  if (combo >= 5) return "대단해요!";
+  if (combo >= 3) return "훌륭해요!";
+  return "좋아요!";
+}
 function grade(ex, ok, highlight) {
   $("#btn-check").style.pointerEvents = "none";
   LESSON.asked++;
   if (ex.item && ex.item.key) srsUpdate(ex.item.key, ok);
+  const fill = $(".pbar .fill");
   if (ok) {
-    LESSON.correct++; sGood();
+    LESSON.correct++; LESSON.combo++;
+    sCorrect(LESSON.combo); vib(12);
     flash("correct");
     highlight();
-    feedback(true, "정답!", ex.item ? solutionLine(ex.item) : "", "계속");
+    if (fill) { fill.classList.remove("glow"); void fill.offsetWidth; fill.classList.add("glow"); }
+    cornerRobot(LESSON.combo >= 3 ? "wow" : "happy");
+    const badge = LESSON.combo >= 3 ? ` <span class="combo-badge">×${LESSON.combo}</span>` : "";
+    feedback(true, praiseText(LESSON.combo) + badge, ex.item ? solutionLine(ex.item) : "", "계속");
   } else {
-    loseHeart(); sBad(); flash("wrong");
+    loseHeart(); LESSON.combo = 0;
+    sWrong(); sHeartLost(); vib(90);
+    flash("wrong");
     highlight();
     LESSON.queue.push(ex); // 다시 출제
+    cornerRobot("sad");
     feedback(false, "오답!", solutionLine(ex.item, ex.answer !== undefined ? ex.answer : null), "계속");
     if (S.hearts.n <= 0) { setTimeout(heartsEmptyDuring, 400); }
   }
   updateTopHearts();
+}
+/* 코너 미니 로봇 반응 */
+function cornerRobot(mood) {
+  const el = $("#crobot");
+  if (!el) return;
+  el.innerHTML = robotSVG(mood === "wow" ? "wow" : mood === "sad" ? "sad" : "happy", 46);
+  el.className = "corner-robot " + (mood === "sad" ? "sad" : "jump");
+  clearTimeout(el._tm);
+  el._tm = setTimeout(() => { el.className = "corner-robot"; el.innerHTML = robotSVG("happy", 46); }, 1600);
 }
 function solutionLine(item, fallbackAns) {
   if (!item) return "";
@@ -855,15 +920,16 @@ function finishLesson() {
   let xp = lesson.id === "__review" ? 5 : (first ? 10 : 5);
   if (acc === 100) xp += 5;
   const gems = first ? 5 : 2;
+  const beforeXP = S.xpByDay[dayKey()] || 0;
   S.xp += xp; S.gems += gems;
-  S.xpByDay[dayKey()] = (S.xpByDay[dayKey()] || 0) + xp;
+  S.xpByDay[dayKey()] = beforeXP + xp;
   bumpStreak();
   if (lesson.id !== "__review") {
     const st = lessonState(lesson.id);
     st.done = true; st.plays++; st.best = Math.max(st.best, acc); st.last = Date.now();
     S.lessons[lesson.id] = st;
   }
-  save(); sDone();
+  save(); sFanfare(); vib([30, 60, 30]);
   confetti();
   $("#app").innerHTML = `
     <div class="lesson-top"><div style="flex:1"></div><div class="stat-chip" style="color:var(--gold-d)"><span class="ico">💎</span>+${gems}</div></div>
@@ -872,12 +938,34 @@ function finishLesson() {
       <h1 style="font-size:26px;margin:8px 0 2px">${lesson.id === "__review" ? "복습 완료!" : "레슨 완료!"}</h1>
       <div style="color:var(--muted2);font-weight:700">${esc(lesson.title)} ${first ? "· 첫 완료!" : ""}</div>
       <div class="ph-stat">
-        <div class="ph"><div class="p-lab">획득 XP</div><div class="p-val xp-gold">+${xp}</div></div>
-        <div class="ph"><div class="p-lab">정확도</div><div class="p-val acc-green">${acc}%</div></div>
-        <div class="ph"><div class="p-lab">연속 학습</div><div class="p-val sc-blue">🔥${S.streak.n}</div></div>
+        <div class="ph pop" style="animation-delay:.05s"><div class="p-lab">획득 XP</div><div class="p-val xp-gold" id="xp-num">+0</div></div>
+        <div class="ph pop" style="animation-delay:.22s"><div class="p-lab">정확도</div><div class="p-val acc-green">${acc}%</div></div>
+        <div class="ph pop" style="animation-delay:.39s"><div class="p-lab">연속 학습</div><div class="p-val sc-blue">🔥${S.streak.n}</div></div>
       </div>
       <button class="btn big btn-green" id="done-go">계속하기</button>
     </div>`;
+  /* XP 카운트업 (rAF 없이 타이머 기반 — 백그라운드 탭에서도 진행) */
+  const el = $("#xp-num"), t0 = Date.now(), DUR = 850;
+  const tm = setInterval(() => {
+    const k = Math.min(1, (Date.now() - t0) / DUR);
+    const eased = 1 - Math.pow(1 - k, 3);
+    el.textContent = "+" + Math.round(xp * eased);
+    if (k >= 1) { clearInterval(tm); note(1568, 0, 0.12, { vol: 0.2, harm: 0.25 }); }
+  }, 40);
+  /* 일일 목표 달성 (당일 1회) */
+  const goal = S.settings.goal || 50;
+  if (beforeXP < goal && (S.xpByDay[dayKey()] || 0) >= goal && S.goalShown !== dayKey()) {
+    S.goalShown = dayKey(); save();
+    setTimeout(() => {
+      sGoal(); confetti(); vib([20, 40, 20, 40, 60]);
+      modal(`<div style="text-align:center">${robotSVG("wow", 110)}</div>
+        <h2 style="margin-top:8px">🎯 오늘의 목표 달성!</h2>
+        <div class="desc">오늘 ${S.xpByDay[dayKey()]} XP를 얻었어요 (${goal} XP 목표 초과).<br>이대로 매일 이어 가면 🔥 연속 학습일도 계속 늘어납니다!</div>
+        <div style="height:14px"></div>
+        <button class="btn big btn-gold" id="goal-ok">계속하기</button>`);
+      $("#goal-ok").addEventListener("click", closeModal);
+    }, 1100);
+  }
   $("#done-go").addEventListener("click", () => { LESSON = null; go("home"); });
 }
 function confetti() {
@@ -967,6 +1055,8 @@ function renderProfile() {
       <div><div class="nm">${esc(S.name)}</div><div class="joined">${new Date(S.firstTs).toLocaleDateString("ko-KR")} 시작 · 로봇산업 중국어 교재 기반</div></div></div>
     <div class="card"><h3>⚙️ 학습 설정</h3>
       <div class="set-row"><span>🔊 중국어 발음 (TTS)</span><button class="btn ${st.tts ? "btn-green" : "btn-gray"}" id="set-tts" style="padding:8px 16px">${st.tts ? "켜짐" : "꺼짐"}</button></div>
+      <div class="set-row"><span>🎵 효과음·진동</span><button class="btn ${st.sfx ? "btn-green" : "btn-gray"}" id="set-sfx" style="padding:8px 16px">${st.sfx ? "켜짐" : "꺼짐"}</button></div>
+      <div class="set-row"><span>🔉 효과음 볼륨</span><div class="seg" id="seg-sfxvol">${[[1, "약하게"], [2, "보통"], [3, "크게"]].map(([v, l]) => `<button data-v="${v}" class="${(st.sfxVol || 2) === v ? "on" : ""}">${l}</button>`).join("")}</div></div>
       <div class="set-row"><span>🗣️ 발음 속도</span><div class="seg" id="seg-rate">${[["0.7", "느리게"], ["0.85", "보통"], ["1", "빠르게"]].map(([v, l]) => `<button data-v="${v}" class="${String(st.ttsRate) === v ? "on" : ""}">${l}</button>`).join("")}</div></div>
       <div class="set-row"><span>🈯 병음 함께 보기</span><button class="btn ${st.py ? "btn-green" : "btn-gray"}" id="set-py" style="padding:8px 16px">${st.py ? "켜짐" : "꺼짐"}</button></div>
       <div class="set-row"><span>🎯 일일 목표</span><div class="seg" id="seg-goal">${[[50, "캐주얼"], [100, "보통"], [150, "열정"]].map(([v, l]) => `<button data-v="${v}" class="${st.goal === v ? "on" : ""}">${l}<br><small>${v}XP</small></button>`).join("")}</div></div>
@@ -976,6 +1066,8 @@ function renderProfile() {
       <div class="desc" style="font-size:13.5px;line-height:1.8">${location.protocol === "https:"
         ? "이 앱은 이미 온라인 상태예요! 사파리 하단 <b>공유 버튼 → 홈 화면에 추가</b>를 누르면 앱처럼 실행되고, 인터넷이 없어도(오프라인) 실행됩니다.<br>학습 기록은 이 기기에 자동 저장돼요. 기록 화면의 <b>데이터 백업</b>으로 보관하세요."
         : "1. 아이폰과 이 컴퓨터가 <b>같은 Wi-Fi</b>에 연결되어 있나요?<br>2. 컴퓨터에서 <code>serve.py</code>를 실행하고 안내된 주소(예: http://192.168.0.5:8000)를 아이폰 사파리로 열어요.<br>3. 사파리 하단 <b>공유 버튼 → 홈 화면에 추가</b>를 누르면 앱처럼 실행돼요.<br>4. 학습 기록은 이 기기에 자동 저장됩니다. 기록 화면의 <b>데이터 백업</b>으로 보관하세요."}</div></div>
+    <div class="card"><h3>📳 진동 안내</h3>
+      <div class="desc" style="font-size:13px;line-height:1.7">정답·오답·완료 시 햅틱 진동이 울립니다.<br>Android는 즉시 지원되며, <b>아이폰은 웹앱 정책상 진동 API가 없어</b> 소리와 화면 연출(흔들림·반짝임)로 대체 제공됩니다.</div></div>
     <div class="card"><h3>ℹ️ 정보</h3>
       <div class="desc" style="font-size:13.5px;line-height:1.8">로보중국어 v1.0 · 듀오링고 방식 학습 게임<br>
       출처: ① 선전 로봇밸리 전시 자료 54장 분석 교재 ② 2026 휴머노이드 로봇 리포트 특강 (부품·AI·산업·투자·문체)<br>
@@ -985,6 +1077,8 @@ function renderProfile() {
   ` + tabbarHTML("profile");
   bindCommon();
   $("#set-tts").addEventListener("click", e => { st.tts = !st.tts; save(); renderProfile(); });
+  $("#set-sfx").addEventListener("click", e => { st.sfx = !(st.sfx !== false); save(); renderProfile(); sCorrect(1); });
+  $$("#seg-sfxvol button").forEach(b => b.addEventListener("click", () => { st.sfxVol = +b.dataset.v; save(); renderProfile(); sCorrect(4); }));
   $("#set-py").addEventListener("click", e => { st.py = !st.py; save(); renderProfile(); });
   $("#set-name").addEventListener("click", () => { const v = prompt("이름을 입력하세요", S.name); if (v) { S.name = v.slice(0, 20); save(); renderProfile(); } });
   $$("#seg-rate button").forEach(b => b.addEventListener("click", () => { st.ttsRate = parseFloat(b.dataset.v); save(); renderProfile(); speak("机器人"); }));
